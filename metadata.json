@@ -1,0 +1,9 @@
+{
+  "name": "Remix: AEGIS COMMAND",
+  "description": "Tactical Command Dashboard with Radar, Drone Control, and Real-time Sensor Integration",
+  "requestFramePermissions": [
+    "camera",
+    "microphone",
+    "geolocation"
+  ]
+}
