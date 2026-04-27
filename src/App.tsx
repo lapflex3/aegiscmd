@@ -881,7 +881,7 @@ export default function App() {
         <div id="sidebar" className="hidden md:flex">
           <div className="sct">Navigation</div>
           <div className={`ni ${activePage === 'dashboard' ? 'active' : ''}`} onClick={() => setActivePage('dashboard')}><span className="ic">◈</span>DASHBOARD</div>
-          <div className={`ni ${activePage === 'mission' ? 'active' : ''}`} onClick={() => setActivePage('mission')}><span className="ic">📋</span>MISSION PLAN</div>
+          <div className={`ni ${activePage === 'mission' ? 'active' : ''}`} onClick={() => setActivePage('mission')}><span className="ic">🗺</span>STRATEGIC OPS</div>
           <div className={`ni ${activePage === 'devices' ? 'active' : ''}`} onClick={() => setActivePage('devices')}><span className="ic">⊕</span>DETECTED<span className="nb r" id="nb-dev">10</span></div>
           <div className={`ni ${activePage === 'config' ? 'active' : ''}`} onClick={() => setActivePage('config')}><span className="ic">◎</span>RADAR CONFIG</div>
           <div className={`ni ${activePage === 'missile' ? 'active' : ''}`} onClick={() => setActivePage('missile')}><span className="ic">⚡</span>MISSILE CTL<span className="nb a" id="nb-mis">!</span></div>
@@ -895,8 +895,8 @@ export default function App() {
           <hr className="sd" />
           <div className="sct">Drone Ops</div>
           <div className={`ni ${activePage === 'fleet' ? 'active' : ''}`} onClick={() => setActivePage('fleet')}><span className="ic">📊</span>FLEET OVERVIEW</div>
+          <div className={`ni ${activePage === 'drone' ? 'active' : ''}`} onClick={() => setActivePage('drone')}><span className="ic">🚁</span>MISSION PLANNER<span className="nb b" id="nb-drones" style={{ fontSize: '7px', padding: '1px 4px' }}>0</span></div>
           <div className={`ni ${activePage === 'telemetry' ? 'active' : ''}`} onClick={() => setActivePage('telemetry')}><span className="ic">📋</span>TELEMETRY LOG</div>
-          <div className={`ni ${activePage === 'drone' ? 'active' : ''}`} onClick={() => setActivePage('drone')}><span className="ic">🚁</span>DRONE CTRL<span className="nb b" id="nb-drones" style={{ fontSize: '7px', padding: '1px 4px' }}>0</span></div>
           <div className={`ni ${activePage === 'autopilot' ? 'active' : ''}`} onClick={() => setActivePage('autopilot')}><span className="ic">🤖</span>AUTOPILOT</div>
           <div className="sct">System</div>
           <div className="tbox">
@@ -1023,60 +1023,64 @@ export default function App() {
             {activePage === 'drone' && (
               <div id="pg-drone" className="pg active">
                 <div className="ph">
-                  <div><div className="pt">DRONE RADAR</div><div className="psub">REAL-TIME UAV TRACKING & CONTROL</div></div>
+                  <div><div className="pt">DRONEMISSION DESIGNER</div><div className="psub">TACTICAL UAV TASKING & OPERATIONAL PLANNING</div></div>
                   <div className="flex gap-2">
-                    <button className="btn bg" onClick={() => window.scanNow?.()}>⊕ SCAN DRONES</button>
+                    <button className="btn bg" onClick={() => window.scanNow?.()}>⊕ REFRESH TARGETS</button>
+                    <button className="btn bb" onClick={() => {
+                        if (!selectedDrone) return;
+                        const lat = fleet.find(d => d.id === selectedDrone)?.lat || 6.12;
+                        const lon = fleet.find(d => d.id === selectedDrone)?.lon || 102.25;
+                        const radius = 0.01;
+                        const circleWP = [
+                          { lat: lat + radius, lon: lon },
+                          { lat: lat, lon: lon + radius },
+                          { lat: lat - radius, lon: lon },
+                          { lat: lat, lon: lon - radius }
+                        ];
+                        setDroneMissions(prev => ({
+                          ...prev,
+                          [selectedDrone]: { ...prev[selectedDrone], waypoints: circleWP }
+                        }));
+                        window.sysLog?.(`[MISSION] Auto-generated 'Area Patrol' pattern for ${selectedDrone}`, 'ok');
+                    }}>⚡ AREA PATROL PRESET</button>
                   </div>
                 </div>
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
                   <div className="pn lg:col-span-2">
                     <div className="pnh">
-                      <span className="pnt">🗺 Live Drone Map</span>
+                      <span className="pnt">🗺 Interactive Mission Map</span>
                       {selectedDrone && (
-                        <span className="text-[10px] text-[var(--bl)] animate-pulse">CLICK MAP TO ADD WAYPOINTS FOR {selectedDrone}</span>
+                        <span className="text-[10px] text-[var(--bl)] animate-pulse">DEPLOY WAYPOINTS BY CLICKING ON TACTICAL GRID</span>
                       )}
                     </div>
-                    <div id="drone-map" className="h-[400px] w-full bg-black/40"></div>
+                    <div id="drone-map" className="h-[450px] w-full bg-black/40"></div>
                   </div>
                   <div className="pn">
-                    <div className="pnh"><span className="pnt">◎ Drone Fleet</span></div>
-                    <div className="pnb">
+                    <div className="pnh"><span className="pnt">◎ Operational Fleet</span></div>
+                    <div className="pnb max-h-[415px] overflow-y-auto">
                       {fleet.map(drone => (
-                        <div key={drone.id} className={`mb-3 p-2 border ${selectedDrone === drone.id ? 'border-[var(--g)] bg-[var(--gk)]/20' : 'border-[var(--bdr)] bg-black/20'} cursor-pointer`} onClick={() => setSelectedDrone(drone.id)}>
+                        <div key={drone.id} className={`mb-3 p-3 border ${selectedDrone === drone.id ? 'border-[var(--g)] bg-[var(--gk)]/20 shadow-[0_0_10px_rgba(0,255,65,0.1)]' : 'border-[var(--bdr)] bg-black/20'} cursor-pointer transition-all`} onClick={() => setSelectedDrone(drone.id)}>
                           <div className="flex justify-between items-center mb-1">
-                            <span className="font-bold text-[var(--g)]">{drone.id}</span>
+                            <span className="font-bold text-[var(--g)] tracking-widest">{drone.id}</span>
                             <span className={`bd ${drone.status === 'ACTIVE' ? 'g' : drone.status === 'STBY' ? 'b' : drone.status === 'RTB' ? 'a' : 'r'}`}>{drone.status}</span>
                           </div>
-                          <div className="text-[9px] text-[var(--txd)] mb-1">
-                            TYPE: {drone.type} | MISSION: {droneMissions[drone.id]?.waypoints.length > 0 ? <span className="text-[var(--bl)]">ACTIVE ({droneMissions[drone.id].waypoints.length} WP)</span> : 'IDLE'}
-                            {droneMissions[drone.id]?.targetId && <span className="ml-2 text-[var(--rd)]">| TGT: {droneMissions[drone.id].targetId}</span>}
+                          <div className="text-[9px] text-[var(--txd)] mb-2">
+                            {drone.type} | {droneMissions[drone.id]?.waypoints.length > 0 ? <span className="text-[var(--bl)] uppercase">{droneMissions[drone.id].roe} MISSION</span> : 'UNASSIGNED'}
                           </div>
-
-                          <div className="mt-2 mb-2">
-                            <div className="text-[8px] text-[var(--txd)] mb-1 uppercase">Assign Target ID</div>
-                            <select 
-                              className="fsel w-full py-1 text-[9px]" 
-                              value={droneMissions[drone.id]?.targetId || ''} 
-                              onClick={(e) => e.stopPropagation()}
-                              onChange={(e) => {
-                                setDroneMissions(prev => ({
-                                  ...prev,
-                                  [drone.id]: { ...prev[drone.id], targetId: e.target.value || null }
-                                }));
-                                window.sysLog?.(`[DRONE] Target ${e.target.value || 'CLEARED'} assigned to ${drone.id}`, 'i');
-                              }}
-                            >
-                              <option value="">NONE</option>
-                              {window.DEV?.filter((d: any) => d.status !== 'FRIENDLY').map((d: any) => (
-                                <option key={d.id} value={d.id}>{d.id} ({d.status})</option>
-                              ))}
-                            </select>
+                          
+                          <div className="flex items-center gap-4 text-[8px] opacity-60 mb-3">
+                            <div className="flex items-center gap-1">
+                              <div className="w-2 h-2 rounded-full bg-[var(--g)]"></div> {drone.batt}% POWER
+                            </div>
+                            <div className="flex items-center gap-1">
+                              <div className="w-2 h-2 rounded-full bg-[var(--bl)]"></div> {drone.signal}% SIG
+                            </div>
                           </div>
 
                           <div className="flex gap-1">
-                            <button className="btn bb py-1 px-2 text-[8px]" onClick={(e) => { e.stopPropagation(); window.connectDev?.(drone.id); }}>CONN</button>
-                            <button className="btn bg py-1 px-2 text-[8px]" onClick={(e) => { e.stopPropagation(); window.takeControl?.(drone.id); }}>CTRL</button>
-                            <button className="btn br py-1 px-2 text-[8px]" onClick={(e) => { e.stopPropagation(); window.jamEntity?.(drone.id); }}>JAM</button>
+                            <button className="btn bg py-1 px-3 text-[8px]" onClick={(e) => { e.stopPropagation(); setSelectedDrone(drone.id); setActivePage('drone'); }}>PLAN</button>
+                            <button className="btn bb py-1 px-3 text-[8px]" onClick={(e) => { e.stopPropagation(); setSelectedDrone(drone.id); setActivePage('camera'); }}>OPTICS</button>
+                            <button className="btn br py-1 px-3 text-[8px]" onClick={(e) => { e.stopPropagation(); window.jamEntity?.(drone.id); }}>ABORT</button>
                           </div>
                         </div>
                       ))}
@@ -1084,120 +1088,152 @@ export default function App() {
                   </div>
                 </div>
 
-                {/* Drone Camera Feed */}
-                <div className="pn mb-4">
-                  <div className="pnh">
-                    <span className="pnt">📷 Live Drone Feed: {selectedDrone || 'NONE'}</span>
-                    {selectedDrone && (
-                      <div className="flex gap-2">
-                        <span className="text-[10px] text-[var(--g)] animate-pulse">● SIGNAL STRENGTH: {fleet.find(d => d.id === selectedDrone)?.signal}%</span>
-                      </div>
-                    )}
+                <div className="grid grid-cols-1 xl:grid-cols-2 gap-4 mb-4">
+                  {/* Mission Planner */}
+                  <div className="pn h-full">
+                    <div className="pnh">
+                      <span className="pnt">🛠 Mission Configuration: {selectedDrone || 'NONE SELECTED'}</span>
+                      {selectedDrone && (
+                        <div className="flex gap-2">
+                          <button className="btn br py-1 px-2 text-[8px]" onClick={() => {
+                            setDroneMissions(prev => ({
+                              ...prev,
+                              [selectedDrone]: { ...prev[selectedDrone], waypoints: [] }
+                            }));
+                            window.sysLog?.(`[DRONE] Waypoints cleared for ${selectedDrone}`, 'w');
+                          }}>CLEAR PLAN</button>
+                          <button className="btn bg py-1 px-2 text-[8px]" onClick={() => {
+                            window.sysLog?.(`[DRONE] Strategic mission data uploaded to ${selectedDrone}`, 'ok');
+                            window.alert2?.('Mission Data Link Established', 'g');
+                          }}>COMMENCE MISSION</button>
+                        </div>
+                      )}
+                    </div>
+                    <div className="pnb">
+                      {!selectedDrone ? (
+                        <div className="h-[200px] flex items-center justify-center text-[var(--txd)] italic">SELECT AN ASSET FROM FLEET TO INITIALIZE MISSION DESIGNER</div>
+                      ) : (
+                        <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
+                          <div className="space-y-4">
+                            <div>
+                              <div className="fl">Rules of Engagement</div>
+                              <select 
+                                className="fsel" 
+                                value={droneMissions[selectedDrone]?.roe} 
+                                onChange={(e) => setDroneMissions(prev => ({
+                                  ...prev,
+                                  [selectedDrone]: { ...prev[selectedDrone], roe: e.target.value }
+                                }))}
+                              >
+                                <option value="PASSIVE">PASSIVE (RECONNAISSANCE)</option>
+                                <option value="DEFENSIVE">DEFENSIVE (COUNTER-MEASURES)</option>
+                                <option value="AGGRESSIVE">AGGRESSIVE (DIRECT ENGAGEMENT)</option>
+                                <option value="STEALTH">STEALTH (LOW PROFILE)</option>
+                              </select>
+                            </div>
+                            <div>
+                              <div className="fl">Priority Target Assignment</div>
+                              <select 
+                                className="fsel" 
+                                value={droneMissions[selectedDrone]?.targetId || ''} 
+                                onChange={(e) => setDroneMissions(prev => ({
+                                  ...prev,
+                                  [selectedDrone]: { ...prev[selectedDrone], targetId: e.target.value || null }
+                                }))}
+                              >
+                                <option value="">FREE HUNT / NO SPECIFIC TARGET</option>
+                                {window.DEV?.filter((d: any) => d.status !== 'FRIENDLY').map((d: any) => (
+                                  <option key={d.id} value={d.id}>{d.id} ({d.status} - {d.type})</option>
+                                ))}
+                              </select>
+                            </div>
+                            <div className="pn bg-black/40 border-[var(--bdr)] p-3">
+                               <div className="text-[10px] text-[var(--g)] font-bold mb-2 uppercase">Mission Summary</div>
+                               <div className="text-[9px] space-y-1">
+                                 <div className="flex justify-between"><span>WAYPOINTS:</span> <span className="text-[var(--bl)]">{droneMissions[selectedDrone]?.waypoints.length} POINTS</span></div>
+                                 <div className="flex justify-between"><span>EST. FLIGHT TIME:</span> <span className="text-[var(--bl)]">{(droneMissions[selectedDrone]?.waypoints.length * 4.5).toFixed(1)} MIN</span></div>
+                                 <div className="flex justify-between"><span>THREAT LEVEL:</span> <span className="text-[var(--rd)]">ELEVATED</span></div>
+                               </div>
+                            </div>
+                          </div>
+                          <div>
+                            <div className="fl">Tactical Waypoints ({droneMissions[selectedDrone]?.waypoints.length})</div>
+                            <div className="max-h-[220px] overflow-y-auto border border-[var(--bdr)] p-2 bg-black/40 scrollbar-thin">
+                              {droneMissions[selectedDrone]?.waypoints.length === 0 ? (
+                                <div className="text-[10px] text-[var(--txd)] italic py-4 text-center">Plan offline. Click the tactical map to deploy mission waypoints.</div>
+                              ) : (
+                                droneMissions[selectedDrone]?.waypoints.map((wp, i) => (
+                                  <div key={i} className="text-[9px] mb-2 flex flex-col border-b border-[var(--bdr)]/30 pb-2 last:border-0 group/wp">
+                                    <div className="flex justify-between mb-1">
+                                      <span className="font-bold text-[var(--bl)]">NODE {String(i+1).padStart(2, '0')}</span>
+                                      <button className="text-[var(--rd)] opacity-0 group-hover/wp:opacity-100 transition-opacity hover:underline" onClick={() => {
+                                        setDroneMissions(prev => {
+                                          const newWaypoints = prev[selectedDrone].waypoints.filter((_, idx) => idx !== i);
+                                          return { ...prev, [selectedDrone]: { ...prev[selectedDrone], waypoints: newWaypoints } };
+                                        });
+                                        window.sysLog?.(`[MISSION] Waypoint ${i+1} removed from flight path`, 'w');
+                                      }}>PURGE</button>
+                                    </div>
+                                    <div className="grid grid-cols-2 gap-2">
+                                      <div className="flex flex-col">
+                                        <span className="text-[7px] text-white/30 uppercase">Lat</span>
+                                        <input 
+                                          type="number" 
+                                          step="0.0001"
+                                          className="fsel w-full py-0.5 px-1 text-[9px]" 
+                                          value={wp.lat} 
+                                          onChange={(e) => updateWaypoint(selectedDrone, i, 'lat', e.target.value)}
+                                        />
+                                      </div>
+                                      <div className="flex flex-col">
+                                        <span className="text-[7px] text-white/30 uppercase">Lon</span>
+                                        <input 
+                                          type="number" 
+                                          step="0.0001"
+                                          className="fsel w-full py-0.5 px-1 text-[9px]" 
+                                          value={wp.lon} 
+                                          onChange={(e) => updateWaypoint(selectedDrone, i, 'lon', e.target.value)}
+                                        />
+                                      </div>
+                                    </div>
+                                  </div>
+                                ))
+                              )}
+                            </div>
+                          </div>
+                        </div>
+                      )}
+                    </div>
                   </div>
-                  <div className="pnb h-[300px] p-0">
-                    <DroneCamera droneId={selectedDrone} fleet={fleet} />
+
+                  {/* Camera Integration */}
+                  <div className="pn">
+                    <div className="pnh">
+                      <span className="pnt">📷 Mission Live Optics: {selectedDrone || 'STANDBY'}</span>
+                      {selectedDrone && (
+                        <div className="flex gap-2">
+                          <span className="text-[10px] text-[var(--g)] animate-pulse">● FEED SECURE (AES-256)</span>
+                          <span className="text-[10px] text-[var(--bl)]">FREQ: 5.8GHZ</span>
+                        </div>
+                      )}
+                    </div>
+                    <div className="pnb h-[320px] p-0 relative">
+                      <DroneCamera droneId={selectedDrone} fleet={fleet} />
+                      {selectedDrone && (
+                          <div className="absolute bottom-4 left-4 right-4 flex justify-between items-end pointer-events-none">
+                              <div className="bg-black/80 p-2 border border-[var(--g)]/30 text-[9px] font-mono">
+                                  <div className="text-[var(--g)]">ALT: {fleet.find(d => d.id === selectedDrone)?.alt}</div>
+                                  <div className="text-[var(--g)]">SPD: {fleet.find(d => d.id === selectedDrone)?.spd}</div>
+                              </div>
+                              <div className="bg-black/80 p-2 border border-[var(--bl)]/30 text-[9px] font-mono text-right">
+                                  <div className="text-[var(--bl)]">SIG: {fleet.find(d => d.id === selectedDrone)?.signal}%</div>
+                                  <div className="text-[var(--am)]">BATT: {fleet.find(d => d.id === selectedDrone)?.batt}%</div>
+                              </div>
+                          </div>
+                      )}
+                    </div>
                   </div>
                 </div>
-
-                {/* Mission Planner */}
-                {selectedDrone && (
-                  <div className="pn mb-4">
-                    <div className="pnh">
-                      <span className="pnt">📋 Mission Planner: {selectedDrone}</span>
-                      <div className="flex gap-2">
-                        <button className="btn br py-1 px-2 text-[8px]" onClick={() => {
-                          setDroneMissions(prev => ({
-                            ...prev,
-                            [selectedDrone]: { ...prev[selectedDrone], waypoints: [] }
-                          }));
-                          window.sysLog?.(`[DRONE] Waypoints cleared for ${selectedDrone}`, 'w');
-                        }}>CLEAR WAYPOINTS</button>
-                        <button className="btn bg py-1 px-2 text-[8px]" onClick={() => {
-                          window.sysLog?.(`[DRONE] Mission uploaded to ${selectedDrone}`, 'ok');
-                          window.alert2?.('Mission Uploaded', 'g');
-                        }}>UPLOAD MISSION</button>
-                      </div>
-                    </div>
-                    <div className="pnb grid grid-cols-1 md:grid-cols-3 gap-4">
-                      <div>
-                        <div className="fl">Rules of Engagement</div>
-                        <select 
-                          className="fsel" 
-                          value={droneMissions[selectedDrone]?.roe} 
-                          onChange={(e) => setDroneMissions(prev => ({
-                            ...prev,
-                            [selectedDrone]: { ...prev[selectedDrone], roe: e.target.value }
-                          }))}
-                        >
-                          <option value="PASSIVE">PASSIVE (RECON ONLY)</option>
-                          <option value="DEFENSIVE">DEFENSIVE (RETURN FIRE)</option>
-                          <option value="AGGRESSIVE">AGGRESSIVE (ENGAGE ON SIGHT)</option>
-                        </select>
-                      </div>
-                      <div>
-                        <div className="fl">Assign Target</div>
-                        <select 
-                          className="fsel" 
-                          value={droneMissions[selectedDrone]?.targetId || ''} 
-                          onChange={(e) => setDroneMissions(prev => ({
-                            ...prev,
-                            [selectedDrone]: { ...prev[selectedDrone], targetId: e.target.value || null }
-                          }))}
-                        >
-                          <option value="">NO TARGET ASSIGNED</option>
-                          {window.DEV?.filter((d: any) => d.status !== 'FRIENDLY').map((d: any) => (
-                            <option key={d.id} value={d.id}>{d.id} ({d.status})</option>
-                          ))}
-                        </select>
-                      </div>
-                      <div>
-                        <div className="fl">Waypoints ({droneMissions[selectedDrone]?.waypoints.length})</div>
-                        <div className="max-h-[200px] overflow-y-auto border border-[var(--bdr)] p-2 bg-black/40">
-                          {droneMissions[selectedDrone]?.waypoints.length === 0 ? (
-                            <div className="text-[10px] text-[var(--txd)] italic">No waypoints set. Click map to add.</div>
-                          ) : (
-                            droneMissions[selectedDrone]?.waypoints.map((wp, i) => (
-                              <div key={i} className="text-[9px] mb-2 flex flex-col border-b border-[var(--bdr)]/30 pb-2 last:border-0">
-                                <div className="flex justify-between mb-1">
-                                  <span className="font-bold text-[var(--bl)]">WAYPOINT {i+1}</span>
-                                  <button className="text-[var(--rd)] hover:underline" onClick={() => {
-                                    setDroneMissions(prev => {
-                                      const newWaypoints = prev[selectedDrone].waypoints.filter((_, idx) => idx !== i);
-                                      return { ...prev, [selectedDrone]: { ...prev[selectedDrone], waypoints: newWaypoints } };
-                                    });
-                                    window.sysLog?.(`[DRONE] Waypoint ${i+1} removed for ${selectedDrone}`, 'w');
-                                  }}>REMOVE</button>
-                                </div>
-                                <div className="flex gap-2">
-                                  <div className="flex-1">
-                                    <div className="text-[7px] text-[var(--txd)] uppercase mb-0.5">Latitude</div>
-                                    <input 
-                                      type="number" 
-                                      step="0.0001"
-                                      className="fsel w-full py-0.5 px-1 text-[9px]" 
-                                      value={wp.lat} 
-                                      onChange={(e) => updateWaypoint(selectedDrone, i, 'lat', e.target.value)}
-                                    />
-                                  </div>
-                                  <div className="flex-1">
-                                    <div className="text-[7px] text-[var(--txd)] uppercase mb-0.5">Longitude</div>
-                                    <input 
-                                      type="number" 
-                                      step="0.0001"
-                                      className="fsel w-full py-0.5 px-1 text-[9px]" 
-                                      value={wp.lon} 
-                                      onChange={(e) => updateWaypoint(selectedDrone, i, 'lon', e.target.value)}
-                                    />
-                                  </div>
-                                </div>
-                              </div>
-                            ))
-                          )}
-                        </div>
-                      </div>
-                    </div>
-                  </div>
-                )}
               </div>
             )}
 
@@ -1460,7 +1496,10 @@ export default function App() {
                 <div className="grid grid-cols-1 xl:grid-cols-3 gap-6">
                   <div className="xl:col-span-2 space-y-4">
                     {fleet.map(drone => (
-                      <div key={drone.id} className="pn hover:border-[var(--g)] transition-colors cursor-pointer" onClick={() => { setSelectedDrone(drone.id); setActivePage('drone'); }}>
+                      <div key={drone.id} className="pn hover:border-[var(--g)] transition-colors cursor-pointer relative group" onClick={() => { setSelectedDrone(drone.id); setActivePage('drone'); }}>
+                        <div className="absolute right-4 top-12 opacity-0 group-hover:opacity-100 transition-opacity">
+                          <button className="btn bg py-1 px-4 text-[10px]">DESIGN MISSION</button>
+                        </div>
                         <div className="pnh flex justify-between items-center">
                           <div className="flex items-center gap-3">
                             <span className="text-xl">🚁</span>
@@ -1696,7 +1735,7 @@ export default function App() {
           <span className="mn-ic">📊</span>FLT
         </button>
         <button className={`mn-btn ${activePage === 'drone' ? 'active' : ''}`} onClick={() => setActivePage('drone')}>
-          <span className="mn-ic">🚁</span>UAV
+          <span className="mn-ic">☄</span>PLAN
         </button>
         <button className={`mn-btn ${activePage === 'camera' ? 'active' : ''}`} onClick={() => setActivePage('camera')}>
           <span className="mn-ic">📷</span>CAM
