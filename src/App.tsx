@@ -206,11 +206,149 @@ export default function App() {
     const [selectedEntity, setSelectedEntity] = useState<any>(null);
     const [command, setCommand] = useState('');
     const [selectedDrone, setSelectedDrone] = useState<string | null>(null);
-    const [droneMissions, setDroneMissions] = useState<Record<string, { waypoints: any[], roe: string, targetId: string | null }>>({
-      'DRN-01': { waypoints: [], roe: 'PASSIVE', targetId: null },
-      'DRN-02': { waypoints: [], roe: 'PASSIVE', targetId: null },
-      'DRN-03': { waypoints: [], roe: 'PASSIVE', targetId: null },
-      'DRN-04': { waypoints: [], roe: 'PASSIVE', targetId: null },
+    const [battThreshold, setBattThreshold] = useState(20);
+    const [lastAlertTime, setLastAlertTime] = useState<Record<string, number>>({});
+    
+    // SIGINT & COMMS STATE
+    const [radioFreq, setRadioFreq] = useState(433.950);
+    const [isScanningRadio, setIsScanningRadio] = useState(false);
+    const [loraSettings, setLoraSettings] = useState({ sf: 7, bw: 125, cr: '4/5', power: 14 });
+    const [gsmNumber, setGsmNumber] = useState('');
+    const [commsLog, setCommsLog] = useState([
+      { from: 'HQ', msg: 'System online. Establishing encrypted tunnel...', time: '14:00:01' },
+      { from: 'DRN-01', msg: 'Uplink stable. LoRa node active.', time: '14:05:12' }
+    ]);
+    const [activeCall, setActiveCall] = useState<null | { id: string, type: 'VOIP' | 'VIDEO' }>(null);
+    const [isPushEnabled, setIsPushEnabled] = useState(true);
+    
+    // Auditory feedback system
+    const audioCtxRef = useRef<AudioContext | null>(null);
+    const [isAudioEnabled, setIsAudioEnabled] = useState(false);
+    const [micStream, setMicStream] = useState<MediaStream | null>(null);
+    const [micVolume, setMicVolume] = useState(0);
+
+    const initAudio = () => {
+      if (!audioCtxRef.current) {
+        audioCtxRef.current = new (window.AudioContext || (window as any).webkitAudioContext)();
+        setIsAudioEnabled(true);
+      }
+    };
+
+    const playSound = (type: 'ui_click' | 'ui_confirm' | 'ui_alert' | 'ui_error' | 'ui_static') => {
+      if (!audioCtxRef.current) return;
+      const ctx = audioCtxRef.current;
+      const osc = ctx.createOscillator();
+      const gain = ctx.createGain();
+      
+      osc.connect(gain);
+      gain.connect(ctx.destination);
+
+      const now = ctx.currentTime;
+
+      switch(type) {
+        case 'ui_click':
+          osc.type = 'sine';
+          osc.frequency.setValueAtTime(1200, now);
+          osc.frequency.exponentialRampToValueAtTime(400, now + 0.05);
+          gain.gain.setValueAtTime(0.1, now);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + 0.05);
+          osc.start(now);
+          osc.stop(now + 0.05);
+          break;
+        case 'ui_confirm':
+          osc.type = 'square';
+          osc.frequency.setValueAtTime(440, now);
+          osc.frequency.setValueAtTime(880, now + 0.1);
+          gain.gain.setValueAtTime(0.05, now);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+          osc.start(now);
+          osc.stop(now + 0.2);
+          break;
+        case 'ui_alert':
+          osc.type = 'triangle';
+          osc.frequency.setValueAtTime(660, now);
+          osc.frequency.setValueAtTime(440, now + 0.1);
+          osc.frequency.setValueAtTime(660, now + 0.2);
+          gain.gain.setValueAtTime(0.1, now);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + 0.3);
+          osc.start(now);
+          osc.stop(now + 0.3);
+          break;
+        case 'ui_error':
+          osc.type = 'sawtooth';
+          osc.frequency.setValueAtTime(150, now);
+          osc.frequency.linearRampToValueAtTime(100, now + 0.2);
+          gain.gain.setValueAtTime(0.1, now);
+          gain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+          osc.start(now);
+          osc.stop(now + 0.2);
+          break;
+        case 'ui_static':
+          const bufferSize = 2 * ctx.sampleRate,
+          buffer = ctx.createBuffer(1, bufferSize, ctx.sampleRate),
+          output = buffer.getChannelData(0);
+          for (let i = 0; i < bufferSize; i++) {
+              output[i] = Math.random() * 2 - 1;
+          }
+          const whiteNoise = ctx.createBufferSource();
+          whiteNoise.buffer = buffer;
+          const noiseGain = ctx.createGain();
+          noiseGain.gain.setValueAtTime(0.02, now);
+          noiseGain.gain.exponentialRampToValueAtTime(0.001, now + 0.2);
+          whiteNoise.connect(noiseGain);
+          noiseGain.connect(ctx.destination);
+          whiteNoise.start(now);
+          whiteNoise.stop(now + 0.2);
+          break;
+      }
+    };
+
+    const toggleMic = async () => {
+      if (micStream) {
+        micStream.getTracks().forEach(track => track.stop());
+        setMicStream(null);
+        setMicVolume(0);
+        playSound('ui_error');
+        return;
+      }
+
+      try {
+        const stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+        setMicStream(stream);
+        playSound('ui_confirm');
+        
+        if (audioCtxRef.current) {
+          const ctx = audioCtxRef.current;
+          const source = ctx.createMediaStreamSource(stream);
+          const analyzer = ctx.createAnalyser();
+          analyzer.fftSize = 256;
+          source.connect(analyzer);
+          
+          const dataArray = new Uint8Array(analyzer.frequencyBinCount);
+          const updateMicLevel = () => {
+            if (!stream.active) return;
+            analyzer.getByteFrequencyData(dataArray);
+            let sum = 0;
+            for (let i = 0; i < dataArray.length; i++) {
+              sum += dataArray[i];
+            }
+            const average = sum / dataArray.length;
+            setMicVolume(average);
+            requestAnimationFrame(updateMicLevel);
+          };
+          updateMicLevel();
+        }
+      } catch (err) {
+        console.error("Mic access denied", err);
+        window.sysLog?.("MIC ACCESS DENIED BY OPERATOR", 'e');
+      }
+    };
+
+    const [droneMissions, setDroneMissions] = useState<Record<string, { waypoints: any[], roe: string, targetId: string | null, currentWpIndex: number }>>({
+      'DRN-01': { waypoints: [], roe: 'PASSIVE', targetId: null, currentWpIndex: 0 },
+      'DRN-02': { waypoints: [], roe: 'PASSIVE', targetId: null, currentWpIndex: 0 },
+      'DRN-03': { waypoints: [], roe: 'PASSIVE', targetId: null, currentWpIndex: 0 },
+      'DRN-04': { waypoints: [], roe: 'PASSIVE', targetId: null, currentWpIndex: 0 },
     });
     const [fleet, setFleet] = useState([
       { id: 'DRN-01', type: 'REAPER-X', status: 'ACTIVE', batt: 82, signal: 94, lat: 6.15, lon: 102.28, alt: '1200m', spd: '45km/h', mission: 'PATROL-A' },
@@ -265,6 +403,11 @@ export default function App() {
       });
     };
 
+    const droneMissionsRef = useRef(droneMissions);
+    useEffect(() => {
+      droneMissionsRef.current = droneMissions;
+    }, [droneMissions]);
+
     useEffect(() => {
       const simulateDrones = () => {
         setFleet(prevFleet => prevFleet.map(drone => {
@@ -283,15 +426,64 @@ export default function App() {
             newStatus = 'OFFLINE';
           }
 
-          // Simulate movement if active
+          // Movement logic
           let newLat = drone.lat;
           let newLon = drone.lon;
           let newSpd = drone.spd;
           let newAlt = drone.alt;
+          const mission = droneMissionsRef.current[drone.id];
 
           if (newStatus === 'ACTIVE' || newStatus === 'RTB') {
-            newLat += (Math.random() - 0.5) * 0.0005;
-            newLon += (Math.random() - 0.5) * 0.0005;
+            let targetLat = newLat;
+            let targetLon = newLon;
+            let isMoving = false;
+
+            if (newStatus === 'RTB') {
+              targetLat = window.HQ_LAT || 6.1254;
+              targetLon = window.HQ_LON || 102.2580;
+              isMoving = true;
+            } else if (mission?.targetId) {
+              const target = window.DEV?.find((d: any) => d.id === mission.targetId);
+              if (target) {
+                targetLat = target.lat;
+                targetLon = target.lon;
+                isMoving = true;
+              }
+            } else if (mission?.waypoints && mission.waypoints.length > 0) {
+              const wpIndex = mission.currentWpIndex || 0;
+              const wp = mission.waypoints[wpIndex];
+              if (wp) {
+                targetLat = wp.lat;
+                targetLon = wp.lon;
+                isMoving = true;
+
+                // Check proximity (approx meters)
+                const dist = Math.sqrt(Math.pow(targetLat - newLat, 2) + Math.pow(targetLon - newLon, 2));
+                if (dist < 0.0005) { // Roughly 50m
+                  // Advance waypoint
+                  setDroneMissions(prev => {
+                    const m = prev[drone.id];
+                    const nextIndex = (wpIndex + 1) % m.waypoints.length;
+                    return {
+                      ...prev,
+                      [drone.id]: { ...m, currentWpIndex: nextIndex }
+                    };
+                  });
+                  window.sysLog?.(`[DRONE] ${drone.id} reached waypoint ${wpIndex + 1}. Vectoring to ${((wpIndex + 1) % m.waypoints.length) + 1}`, 'ok');
+                }
+              }
+            }
+
+            if (isMoving) {
+              const dx = (targetLat - newLat) * 0.05;
+              const dy = (targetLon - newLon) * 0.05;
+              newLat += dx + (Math.random() - 0.5) * 0.0001;
+              newLon += dy + (Math.random() - 0.5) * 0.0001;
+            } else {
+              // Brownian motion/patrol
+              newLat += (Math.random() - 0.5) * 0.0005;
+              newLon += (Math.random() - 0.5) * 0.0005;
+            }
             
             const currentSpd = parseInt(drone.spd) || 0;
             const currentAlt = parseInt(drone.alt) || 0;
@@ -308,6 +500,17 @@ export default function App() {
 
           // Random signal fluctuations
           let newSignal = Math.min(100, Math.max(0, drone.signal + (Math.random() - 0.5) * 3));
+
+          // Battery Alert Logic
+          if (newBatt <= battThreshold && drone.status !== 'OFFLINE' && drone.status !== 'RTB') {
+            const now = Date.now();
+            const lastAlert = lastAlertTime[drone.id] || 0;
+            if (now - lastAlert > 30000) { // Alert every 30s
+              window.sysLog?.(`[CRITICAL] Low battery on ${drone.id} (${newBatt.toFixed(1)}%). Priority RTB recommended.`, 'r');
+              playSound('ui_alert');
+              setLastAlertTime(prev => ({ ...prev, [drone.id]: now }));
+            }
+          }
 
           return {
             ...drone,
@@ -329,7 +532,7 @@ export default function App() {
     const handleCommand = (e: FormEvent) => {
       e.preventDefault();
       if (!command.trim()) return;
-      
+      playSound('ui_click');
       const cmdText = command.trim();
       const args = cmdText.toLowerCase().split(' ');
       const baseCmd = args[0];
@@ -369,6 +572,32 @@ export default function App() {
           if (args[1]) {
             setActivePage(args[1]);
             window.sysLog?.(`Navigating to ${args[1]}`, 'ok');
+          }
+          break;
+        case 'drone':
+          {
+            const droneId = args[1]?.toUpperCase();
+            const action = args[2];
+            const val = args[3];
+            
+            if (!droneId || !action) {
+              window.sysLog?.('Usage: drone [id] [rtb|task|roe] [val]', 'w');
+              break;
+            }
+            
+            if (action === 'rtb') {
+              setFleet(prev => prev.map(d => d.id === droneId ? { ...d, status: 'RTB', mission: 'MANUAL RTB' } : d));
+              window.sysLog?.(`[CMD] Drone ${droneId} ordered to RTB`, 'ok');
+            } else if (action === 'task') {
+              if (!val) { window.sysLog?.('Usage: drone [id] task [targetId]', 'w'); break; }
+              setDroneMissions(prev => ({ ...prev, [droneId]: { ...prev[droneId], targetId: val } }));
+              window.sysLog?.(`[CMD] Drone ${droneId} tasked to target ${val}`, 'ok');
+            } else if (action === 'roe') {
+               const roeVal = val?.toUpperCase();
+               if (!roeVal) { window.sysLog?.('Usage: drone [id] roe [passive|defensive|aggressive]', 'w'); break; }
+               setDroneMissions(prev => ({ ...prev, [droneId]: { ...prev[droneId], roe: roeVal } }));
+               window.sysLog?.(`[CMD] Drone ${droneId} ROE set to ${roeVal}`, 'ok');
+            }
           }
           break;
         default:
@@ -433,6 +662,9 @@ export default function App() {
       el.className = 'alf ' + type;
       el.textContent = msg;
       document.body.appendChild(el);
+      if (type === 'r' || type === 'e') playSound('ui_error');
+      else if (type === 'w') playSound('ui_alert');
+      else playSound('ui_confirm');
       setTimeout(() => el.remove(), 4000);
     };
     window.alert2 = alert2;
@@ -619,18 +851,34 @@ export default function App() {
           <td style="color:${cval}">${d.id}</td>
           <td>${d.type}</td>
           <td style="color:${d.strength > -70 ? 'var(--rd)' : d.strength > -85 ? 'var(--am)' : 'var(--g)'}">${d.strength} dBm</td>
-          <td style="color:var(--txd)">${d.lat.toFixed(1)}°N ${d.lon.toFixed(1)}°E</td>
+          <td style="color:var(--txd)">${d.lat.toFixed(4)}°N ${d.lon.toFixed(4)}°E</td>
           <td>${d.bearing}°</td>
           <td>${d.range.toFixed(1)} km</td>
           <td style="color:${d.speed > 500 ? 'var(--rd)' : d.speed > 0 ? 'var(--am)' : 'var(--txd)'}">${d.speed > 0 ? d.speed + ' km/h' : '—'}</td>
           <td><span class="bd ${cc}">${d.status}</span></td>
           <td class="flex gap-1">
             <button class="btn bb py-1 px-2 text-[9px]" onclick="window.connectDev?.('${d.id}')">CONNECT</button>
+            ${d.status !== 'FRIENDLY' ? `<button class="btn bg py-1 px-2 text-[9px]" onclick="window.assignTargetToActiveDrone?.('${d.id}')">TASK DRONE</button>` : ''}
           </td>
         </tr>`;
       }).join('');
     };
     window.buildDevTable = buildDevTable;
+
+    window.assignTargetToActiveDrone = (targetId: string) => {
+        if (!selectedDrone) {
+            window.alert2?.('Select a drone in PLANNER first', 'w');
+            setActivePage('drone');
+            return;
+        }
+        setDroneMissions(prev => ({
+            ...prev,
+            [selectedDrone]: { ...prev[selectedDrone], targetId }
+        }));
+        window.sysLog?.(`[TASKING] Assigned ${selectedDrone} to shadow/intercept ${targetId}`, 'ok');
+        window.alert2?.(`Tasking ${selectedDrone} to ${targetId}`, 'g');
+        setActivePage('drone');
+    };
 
     window.runDiag = () => {
       sysLog('[DIAG] Running diagnostics...', 'i');
@@ -774,6 +1022,87 @@ export default function App() {
 
     // Drone Map Logic
     let droneMap: any;
+    let satRadarMap: any;
+
+    const initSatRadar = () => {
+        const el = document.getElementById('sat-radar-map');
+        if (!el || !window.L) return;
+        if (satRadarMap) satRadarMap.remove();
+        
+        satRadarMap = window.L.map('sat-radar-map', {
+            zoomControl: false,
+            attributionControl: false
+        }).setView([HQ_LAT, HQ_LON], 11);
+        
+        window.satRadarMap = satRadarMap;
+
+        // Esri Satellite Tiles
+        window.L.tileLayer('https://server.arcgisonline.com/ArcGIS/rest/services/World_Imagery/MapServer/tile/{z}/{y}/{x}', {
+            maxZoom: 19
+        }).addTo(satRadarMap);
+
+        // Add a semi-transparent green overlay for "radar" look
+        const greenOverlay = window.L.rectangle([[-90, -180], [90, 180]], {
+            color: 'transparent',
+            fillColor: '#00ff41',
+            fillOpacity: 0.05,
+            interactive: false
+        }).addTo(satRadarMap);
+
+        // Grid lines overlay
+        const canvasIcon = window.L.divIcon({
+            className: 'radar-grid-icon',
+            html: '<div class="w-full h-full border border-white/5"></div>',
+            iconSize: [100, 100]
+        });
+
+        // Add pins for HQ and Devices
+        window.L.circleMarker([HQ_LAT, HQ_LON], {
+            radius: 8,
+            color: '#00ff41',
+            fillColor: '#00ff41',
+            fillOpacity: 0.8,
+            weight: 2
+        }).addTo(satRadarMap).bindPopup("<b>AEGIS HQ</b><br>COMMAND CENTER");
+
+        window.DEV.forEach((d: any) => {
+            const col = d.status === 'HOSTILE' ? '#ff2244' : d.status === 'FRIENDLY' ? '#00ff41' : '#ffb300';
+            const marker = window.L.circleMarker([d.lat, d.lon], {
+                radius: 6,
+                color: col,
+                fillColor: col,
+                fillOpacity: 0.7,
+                weight: 1
+            }).addTo(satRadarMap);
+
+            marker.bindPopup(`<b>${d.id}</b><br>Type: ${d.type}<br>Status: ${d.status}`);
+            
+            // Pulse effect for hostiles
+            if (d.status === 'HOSTILE') {
+                const pulse = window.L.circle([d.lat, d.lon], {
+                    radius: 500,
+                    color: '#ff2244',
+                    fillColor: '#ff2244',
+                    fillOpacity: 0.2,
+                    weight: 1,
+                    className: 'animate-pulse'
+                }).addTo(satRadarMap);
+            }
+        });
+
+        // Add Drones
+        fleet.forEach(d => {
+            const marker = window.L.circleMarker([d.lat, d.lon], {
+                radius: 5,
+                color: '#00d4ff',
+                fillColor: '#00d4ff',
+                fillOpacity: 0.9,
+                weight: 1
+            }).addTo(satRadarMap).bindPopup(`<b>${d.id}</b><br>Alt: ${d.alt}<br>Spd: ${d.spd}`);
+        });
+    };
+    window.initSatRadar = initSatRadar;
+
     const initDroneMap = () => {
       const el = document.getElementById('drone-map');
       if (!el || !window.L) return;
@@ -802,8 +1131,40 @@ export default function App() {
         const latlngs = window.currentWaypoints.map((wp: any) => [wp.lat, wp.lon]);
         window.L.polyline(latlngs, { color: '#00d4ff', dashArray: '5, 10' }).addTo(droneMap);
         window.currentWaypoints.forEach((wp: any, idx: number) => {
-          window.L.circleMarker([wp.lat, wp.lon], { radius: 4, color: '#00d4ff' }).addTo(droneMap)
+          const marker = window.L.circleMarker([wp.lat, wp.lon], { 
+                radius: 6, 
+                color: '#00d4ff', 
+                fillColor: '#00d4ff', 
+                fillOpacity: 0.6,
+                interactive: true,
+                draggable: true 
+            }).addTo(droneMap)
             .bindTooltip(`WP ${idx + 1}`, { permanent: true, direction: 'right' });
+
+          // Note: L.circleMarker doesn't natively support dragging in the same way as L.marker
+          // But we can use L.marker with a custom icon for easier dragging
+          const dragMarker = window.L.marker([wp.lat, wp.lon], {
+              draggable: true,
+              icon: window.L.divIcon({
+                  className: 'custom-wp-icon',
+                  html: `<div style="width:12px;height:12px;background:#00d4ff;border:2px solid #fff;border-radius:50%;box-shadow:0 0 10px #00d4ff;"></div>`,
+                  iconSize: [12, 12]
+              })
+          }).addTo(droneMap);
+
+          dragMarker.on('dragend', (e: any) => {
+              const newPos = e.target.getLatLng();
+              if (window.updateWaypoint) {
+                  window.updateWaypoint(selectedDrone, idx, 'lat', newPos.lat.toString());
+                  window.updateWaypoint(selectedDrone, idx, 'lon', newPos.lng.toString());
+                  playSound('ui_confirm');
+              }
+          });
+          
+          dragMarker.on('click', () => {
+              playSound('ui_click');
+              window.alert2?.(`Waypoint ${idx+1} Selected`, 'b');
+          });
         });
       }
     };
@@ -826,9 +1187,86 @@ export default function App() {
     };
 
     // Initialize based on activePage
+    useEffect(() => {
+        if (isScanningRadio) {
+            const interval = setInterval(() => {
+                setRadioFreq(prev => {
+                    let next = prev + (Math.random() > 0.5 ? 0.001 : -0.001);
+                    if (next < 30) next = 30;
+                    if (next > 3000) next = 3000;
+                    return next;
+                });
+            }, 100);
+            return () => clearInterval(interval);
+        }
+    }, [isScanningRadio]);
+
+    useEffect(() => {
+        const triggers = [
+            { t: 5000, m: 'PRIORITY: INCOMING ENCRYPTED HANDSHAKE FROM UNKNOWN SOURCE', type: 'msg' },
+            { t: 15000, m: 'VULNERABILITY DETECTED IN SECTOR 7G', type: 'msg' },
+            { t: 25000, m: 'FORCE CONNECT INITIATED BY HQ', type: 'call' },
+        ];
+
+        const timeouts = triggers.map(trig => setTimeout(() => {
+            if (trig.type === 'msg') {
+                setCommsLog(prev => [...prev, { from: 'SYSTEM', msg: trig.m, time: new Date().toLocaleTimeString() }]);
+                if (isPushEnabled) {
+                    window.alert2?.(`COMM: ${trig.m}`, 'i');
+                    playSound('ui_alert');
+                }
+            } else if (trig.type === 'call') {
+                setActiveCall({ id: 'HQ_COMMAND_DIRECT', type: 'VIDEO' });
+                setActivePage('comms');
+                window.alert2?.('FORCE CONNECT: HQ_COMMAND', 'r');
+                playSound('ui_alert');
+            }
+        }, trig.t));
+
+        return () => timeouts.forEach(t => clearTimeout(t));
+    }, [isPushEnabled]);
+
+    const drawSpectrum = () => {
+        const canvas = document.getElementById('spectrum-canvas') as HTMLCanvasElement;
+        if (!canvas) return;
+        const ctx = canvas.getContext('2d');
+        if (!ctx) return;
+
+        const w = canvas.width;
+        const h = canvas.height;
+        ctx.clearRect(0, 0, w, h);
+
+        // Draw grid
+        ctx.strokeStyle = '#00ff4133';
+        ctx.beginPath();
+        for(let i=0; i<w; i+=20) { ctx.moveTo(i, 0); ctx.lineTo(i, h); }
+        for(let j=0; j<h; j+=20) { ctx.moveTo(0, j); ctx.lineTo(w, j); }
+        ctx.stroke();
+
+        // Draw noise
+        ctx.strokeStyle = '#00ff41';
+        ctx.lineWidth = 1;
+        ctx.beginPath();
+        ctx.moveTo(0, h/2);
+        for(let x=0; x<w; x++) {
+            const noise = (Math.random() - 0.5) * 10;
+            const signal = x > w/2 - 20 && x < w/2 + 20 ? (Math.sin((x-w/2)*0.1) * 30 * (1 - Math.abs(x-w/2)/20)) : 0;
+            ctx.lineTo(x, h/2 + noise - signal);
+        }
+        ctx.stroke();
+    };
+
+    useEffect(() => {
+        if (activePage === 'sigint') {
+            const interval = setInterval(drawSpectrum, 50);
+            return () => clearInterval(interval);
+        }
+    }, [activePage]);
+
     if (activePage === 'fighterjet') drawFighterRadar();
     if (activePage === 'missile') drawMissileRadar();
     if (activePage === 'drone') setTimeout(initDroneMap, 100);
+    if (activePage === 'liveradar') setTimeout(initSatRadar, 100);
 
     // Initialize
     initBlips();
@@ -879,25 +1317,44 @@ export default function App() {
       <div id="app" className="flex flex-1 overflow-hidden">
         {/* Sidebar */}
         <div id="sidebar" className="hidden md:flex">
+          <div className="flex items-center gap-2 mb-4 px-2">
+            <button 
+              className={`flex-1 flex items-center justify-center gap-2 py-1.5 rounded border transition-all ${isAudioEnabled ? 'bg-[var(--bl)]/20 border-[var(--bl)] text-[var(--bl)]' : 'bg-black/40 border-[var(--bdr)] text-[var(--txd)]'}`}
+              onClick={initAudio}
+            >
+              <span className="text-xs">{isAudioEnabled ? '🔊 AUDIO ON' : '🔈 AUDIO OFF'}</span>
+            </button>
+            <button 
+              className={`flex-1 flex items-center justify-center gap-2 py-1.5 rounded border transition-all ${micStream ? 'bg-[var(--rd)]/20 border-[var(--rd)] text-[var(--rd)] animate-pulse' : 'bg-black/40 border-[var(--bdr)] text-[var(--txd)]'}`}
+              onClick={toggleMic}
+            >
+              <span className="text-xs">{micStream ? '🎤 MIC ON' : '🎤 MIC OFF'}</span>
+            </button>
+          </div>
+
           <div className="sct">Navigation</div>
-          <div className={`ni ${activePage === 'dashboard' ? 'active' : ''}`} onClick={() => setActivePage('dashboard')}><span className="ic">◈</span>DASHBOARD</div>
-          <div className={`ni ${activePage === 'mission' ? 'active' : ''}`} onClick={() => setActivePage('mission')}><span className="ic">🗺</span>STRATEGIC OPS</div>
-          <div className={`ni ${activePage === 'devices' ? 'active' : ''}`} onClick={() => setActivePage('devices')}><span className="ic">⊕</span>DETECTED<span className="nb r" id="nb-dev">10</span></div>
-          <div className={`ni ${activePage === 'config' ? 'active' : ''}`} onClick={() => setActivePage('config')}><span className="ic">◎</span>RADAR CONFIG</div>
-          <div className={`ni ${activePage === 'missile' ? 'active' : ''}`} onClick={() => setActivePage('missile')}><span className="ic">⚡</span>MISSILE CTL<span className="nb a" id="nb-mis">!</span></div>
-          <div className={`ni ${activePage === 'fighterjet' ? 'active' : ''}`} onClick={() => setActivePage('fighterjet')}><span className="ic">✈</span>FIGHTER RADAR</div>
+          <div className={`ni ${activePage === 'dashboard' ? 'active' : ''}`} onClick={() => { setActivePage('dashboard'); playSound('ui_click'); }}><span className="ic">◈</span>DASHBOARD</div>
+          <div className={`ni ${activePage === 'mission' ? 'active' : ''}`} onClick={() => { setActivePage('mission'); playSound('ui_click'); }}><span className="ic">🗺</span>STRATEGIC OPS</div>
+          <div className={`ni ${activePage === 'devices' ? 'active' : ''}`} onClick={() => { setActivePage('devices'); playSound('ui_click'); }}><span className="ic">⊕</span>DETECTED<span className="nb r" id="nb-dev">{window.DEV?.length || 0}</span></div>
+          <div className={`ni ${activePage === 'config' ? 'active' : ''}`} onClick={() => { setActivePage('config'); playSound('ui_click'); }}><span className="ic">◎</span>RADAR CONFIG</div>
+          <div className={`ni ${activePage === 'missile' ? 'active' : ''}`} onClick={() => { setActivePage('missile'); playSound('ui_click'); }}><span className="ic">⚡</span>MISSILE CTL<span className="nb a" id="nb-mis">!</span></div>
+          <div className={`ni ${activePage === 'fighterjet' ? 'active' : ''}`} onClick={() => { setActivePage('fighterjet'); playSound('ui_click'); }}><span className="ic">✈</span>FIGHTER RADAR</div>
           <hr className="sd" />
-          <div className="sct">Live Sensors</div>
-          <div className={`ni ${activePage === 'liveradar' ? 'active' : ''}`} onClick={() => setActivePage('liveradar')}><span className="ic">🎯</span>LIVE RADAR<span className="nb g" id="nb-gps" style={{ fontSize: '7px', padding: '1px 4px' }}>GPS</span></div>
-          <div className={`ni ${activePage === 'flightradar' ? 'active' : ''}`} onClick={() => setActivePage('flightradar')}><span className="ic">✈</span>FLIGHT RADAR<span className="nb b" id="nb-flights" style={{ fontSize: '7px', padding: '1px 4px' }}>0</span></div>
-          <div className={`ni ${activePage === 'shipradar' ? 'active' : ''}`} onClick={() => setActivePage('shipradar')}><span className="ic">🚢</span>SHIP RADAR<span className="nb g" id="nb-ships" style={{ fontSize: '7px', padding: '1px 4px' }}>0</span></div>
-          <div className={`ni ${activePage === 'camera' ? 'active' : ''}`} onClick={() => setActivePage('camera')}><span className="ic">📷</span>CAMERA AR</div>
+          <div className="sct">Communications</div>
+          <div className={`ni ${activePage === 'sigint' ? 'active' : ''}`} onClick={() => { setActivePage('sigint'); playSound('ui_click'); }}><span className="ic">📡</span>SIGNAL CENTER</div>
+          <div className={`ni ${activePage === 'comms' ? 'active' : ''}`} onClick={() => { setActivePage('comms'); playSound('ui_click'); }}><span className="ic">💬</span>COMMS HUB<span className="nb a" style={{ fontSize: '7px', padding: '1px 4px' }}>LIVE</span></div>
+          <div className={`ni ${activePage === 'lora' ? 'active' : ''}`} onClick={() => { setActivePage('lora'); playSound('ui_click'); }}><span className="ic">📶</span>LORA TRANSCEIVER</div>
+          <div className={`ni ${activePage === 'gsm' ? 'active' : ''}`} onClick={() => { setActivePage('gsm'); playSound('ui_click'); }}><span className="ic">📱</span>GSM HANDSET</div>
+          <div className={`ni ${activePage === 'liveradar' ? 'active' : ''}`} onClick={() => { setActivePage('liveradar'); playSound('ui_click'); }}><span className="ic">🛰</span>SAT RADAR<span className="nb g" id="nb-gps" style={{ fontSize: '7px', padding: '1px 4px' }}>LIVE</span></div>
+          <div className={`ni ${activePage === 'flightradar' ? 'active' : ''}`} onClick={() => { setActivePage('flightradar'); playSound('ui_click'); }}><span className="ic">✈</span>FLIGHT RADAR<span className="nb b" id="nb-flights" style={{ fontSize: '7px', padding: '1px 4px' }}>0</span></div>
+          <div className={`ni ${activePage === 'shipradar' ? 'active' : ''}`} onClick={() => { setActivePage('shipradar'); playSound('ui_click'); }}><span className="ic">🚢</span>SHIP RADAR<span className="nb g" id="nb-ships" style={{ fontSize: '7px', padding: '1px 4px' }}>0</span></div>
+          <div className={`ni ${activePage === 'camera' ? 'active' : ''}`} onClick={() => { setActivePage('camera'); playSound('ui_click'); }}><span className="ic">📷</span>CAMERA AR</div>
           <hr className="sd" />
           <div className="sct">Drone Ops</div>
-          <div className={`ni ${activePage === 'fleet' ? 'active' : ''}`} onClick={() => setActivePage('fleet')}><span className="ic">📊</span>FLEET OVERVIEW</div>
-          <div className={`ni ${activePage === 'drone' ? 'active' : ''}`} onClick={() => setActivePage('drone')}><span className="ic">🚁</span>MISSION PLANNER<span className="nb b" id="nb-drones" style={{ fontSize: '7px', padding: '1px 4px' }}>0</span></div>
-          <div className={`ni ${activePage === 'telemetry' ? 'active' : ''}`} onClick={() => setActivePage('telemetry')}><span className="ic">📋</span>TELEMETRY LOG</div>
-          <div className={`ni ${activePage === 'autopilot' ? 'active' : ''}`} onClick={() => setActivePage('autopilot')}><span className="ic">🤖</span>AUTOPILOT</div>
+          <div className={`ni ${activePage === 'fleet' ? 'active' : ''}`} onClick={() => { setActivePage('fleet'); playSound('ui_click'); }}><span className="ic">📊</span>FLEET OVERVIEW</div>
+          <div className={`ni ${activePage === 'drone' ? 'active' : ''}`} onClick={() => { setActivePage('drone'); playSound('ui_click'); }}><span className="ic">🚁</span>MISSION PLANNER<span className="nb b" id="nb-drones" style={{ fontSize: '7px', padding: '1px 4px' }}>0</span></div>
+          <div className={`ni ${activePage === 'telemetry' ? 'active' : ''}`} onClick={() => { setActivePage('telemetry'); playSound('ui_click'); }}><span className="ic">📋</span>TELEMETRY LOG</div>
+          <div className={`ni ${activePage === 'autopilot' ? 'active' : ''}`} onClick={() => { setActivePage('autopilot'); playSound('ui_click'); }}><span className="ic">🤖</span>AUTOPILOT</div>
           <div className="sct">System</div>
           <div className="tbox">
             <div className="tbl">Threat Level</div>
@@ -915,13 +1372,373 @@ export default function App() {
             transition={{ duration: 0.3 }}
             className="p-4"
           >
+            {activePage === 'sigint' && (
+              <div id="pg-sigint" className="pg active h-full flex flex-col">
+                <div className="ph">
+                  <div><div className="pt">SIGNAL INTELLIGENCE (SIGINT)</div><div className="psub">MULTI-FREQUENCY SCANNER & TUNER</div></div>
+                  <div className="flex gap-2">
+                    <button className={`btn ${isScanningRadio ? 'br animate-pulse' : 'bg'}`} onClick={() => { setIsScanningRadio(!isScanningRadio); playSound('ui_confirm'); }}>{isScanningRadio ? 'STOPPING SCAN...' : '⊕ START SCAN'}</button>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 flex-1">
+                  <div className="lg:col-span-2 space-y-4">
+                    <div className="pn h-[300px] flex flex-col">
+                       <div className="pnh"><span className="pnt">Live Spectrum Analyzer</span></div>
+                       <div className="flex-1 bg-black/40 relative">
+                          <canvas id="spectrum-canvas" className="w-full h-full"></canvas>
+                          <div className="absolute top-2 left-2 text-[10px] text-[var(--g)] font-mono">BAND: UHF/VHF | FREQ: {radioFreq.toFixed(3)} MHz</div>
+                       </div>
+                    </div>
+                    <div className="pn p-4">
+                       <div className="pnh"><span className="pnt">Frequency Controls</span></div>
+                       <div className="flex items-center gap-6 mt-4">
+                          <div className="flex-1">
+                             <input 
+                                type="range" 
+                                min="30" 
+                                max="3000" 
+                                step="0.001" 
+                                value={radioFreq} 
+                                onChange={(e) => { setRadioFreq(parseFloat(e.target.value)); playSound('ui_static'); }}
+                                className="w-full h-2 bg-black/60 rounded-full appearance-none cursor-pointer accent-[var(--g)]"
+                             />
+                             <div className="flex justify-between text-[8px] mt-2 opacity-50">
+                                <span>30 MHz</span>
+                                <span>1500 MHz</span>
+                                <span>3000 MHz</span>
+                             </div>
+                          </div>
+                          <div className="w-32 bg-black text-center p-2 border border-[var(--g)]/30">
+                             <div className="text-[10px] opacity-50">TUNED</div>
+                             <div className="text-xl font-mono text-[var(--g)]">{radioFreq.toFixed(3)}</div>
+                             <div className="text-[8px] text-[var(--bl)]">MEGAHERTZ</div>
+                          </div>
+                       </div>
+                    </div>
+                  </div>
+                  <div className="pn flex flex-col">
+                     <div className="pnh"><span className="pnt">Signal Logs</span></div>
+                     <div className="flex-1 overflow-y-auto p-2 space-y-2">
+                        {[
+                          { f: '433.920', s: 'HIGH', t: 'ENCRYPTED' },
+                          { f: '868.100', s: 'MED', t: 'LORA_MOD' },
+                          { f: '902.500', s: 'LOW', t: 'GSM_IDLE' },
+                          { f: '2412.000', s: 'HIGH', t: 'WIFI_DATA' },
+                        ].map((sig, i) => (
+                           <div key={i} className="p-2 border border-[var(--bdr)]/30 hover:bg-[var(--g)]/5 cursor-pointer" onClick={() => { setRadioFreq(parseFloat(sig.f)); playSound('ui_confirm'); }}>
+                              <div className="flex justify-between text-[9px]">
+                                 <span className="text-[var(--g)]">{sig.f} MHz</span>
+                                 <span className="opacity-50">{sig.t}</span>
+                              </div>
+                              <div className="h-1 bg-black/40 mt-1">
+                                 <div className={`h-full ${sig.s === 'HIGH' ? 'bg-[var(--g)] w-full' : sig.s === 'MED' ? 'bg-[var(--am)] w-2/3' : 'bg-[var(--rd)] w-1/3'}`}></div>
+                              </div>
+                           </div>
+                        ))}
+                     </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {activePage === 'comms' && (
+              <div id="pg-comms" className="pg active h-full flex flex-col">
+                <div className="ph">
+                  <div><div className="pt">COMMS HUB</div><div className="psub">TACTICAL VOIP & VIDEO MESSAGING</div></div>
+                  <div className="flex gap-2">
+                    <button className="btn bb" onClick={() => { setActiveCall({ id: 'HQ-OPERATOR', type: 'VIDEO' }); playSound('ui_confirm'); }}>⊕ FORCE CONNECT VIDEO</button>
+                    <button className="btn bg" onClick={() => { setActiveCall({ id: 'DRN-04-PILOT', type: 'VOIP' }); playSound('ui_confirm'); }}>⊕ VOIP LINK</button>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 lg:grid-cols-4 gap-4 flex-1">
+                  <div className="lg:col-span-3 flex flex-col gap-4">
+                    <div className="pn flex-1 flex flex-col overflow-hidden">
+                       <div className="pnh flex justify-between items-center">
+                          <span className="pnt">Active Encrypted Tunnel</span>
+                          {activeCall && <span className="text-[8px] bg-[var(--rd)] px-2 animate-pulse rounded">LIVE CONNECTION</span>}
+                       </div>
+                       <div className="flex-1 bg-black/80 relative flex items-center justify-center">
+                          {activeCall?.type === 'VIDEO' ? (
+                             <div className="w-full h-full flex items-center justify-center bg-zinc-900 border-2 border-[var(--rd)]/40 relative">
+                                <div className="absolute top-4 left-4 p-2 bg-black/60 text-[8px] border border-[var(--rd)]/40 text-[var(--rd)] uppercase">
+                                   DECRIPTING FEED... AEGIS_HUD_v4
+                                </div>
+                                <div className="text-center">
+                                   <div className="w-24 h-24 border-2 border-dashed border-[var(--rd)]/50 rounded-full animate-spin flex items-center justify-center p-2 mb-4 mx-auto">
+                                      <div className="w-full h-full border-2 border-dashed border-[var(--rd)]/50 rounded-full animate-reverse-spin"></div>
+                                   </div>
+                                   <div className="text-[var(--rd)] font-mono text-xs">ESTABLISHING STEALTH UPLINK</div>
+                                   <div className="text-[10px] opacity-40 mt-1">PEER: {activeCall.id}</div>
+                                </div>
+                                <div className="absolute bottom-4 right-4 flex gap-2">
+                                   <button className="btn br px-4 py-2" onClick={() => { setActiveCall(null); playSound('ui_error'); }}>TERMINATE</button>
+                                </div>
+                             </div>
+                          ) : activeCall?.type === 'VOIP' ? (
+                             <div className="w-full h-full flex flex-col items-center justify-center p-8">
+                                <div className="w-16 h-16 bg-[var(--bl)]/20 rounded-full flex items-center justify-center mb-4">
+                                   <span className="text-2xl">🎙</span>
+                                </div>
+                                <div className="text-[var(--bl)] font-mono mb-6">VOICE LINK ACTIVE: {activeCall.id}</div>
+                                <div className="flex items-end gap-1 h-32 w-full">
+                                   {[...Array(32)].map((_, i) => (
+                                      <div key={i} className="flex-1 bg-[var(--bl)]" style={{ height: `${Math.random() * 100}%`, opacity: 0.2 + Math.random()*0.8 }}></div>
+                                   ))}
+                                </div>
+                                <button className="btn br mt-8" onClick={() => { setActiveCall(null); playSound('ui_error'); }}>DISCONNECT</button>
+                             </div>
+                          ) : (
+                             <div className="text-center opacity-20">
+                                <span className="text-6xl mb-4 block">📡</span>
+                                <div className="text-xs uppercase tracking-widest">IDLE | WAITING FOR UPLINK</div>
+                             </div>
+                          )}
+                       </div>
+                    </div>
+                    <div className="pn h-32 flex flex-col p-2">
+                       <div className="pnh"><span className="pnt">System Notifications</span></div>
+                       <div className="flex-1 overflow-y-auto space-y-1">
+                          {isPushEnabled && <div className="text-[8px] text-[var(--g)] flex items-center gap-1"><span className="w-1 h-1 bg-[var(--g)] rounded-full"></span> [PUSH] INCOMING ENCRYPTED BUFFER FROM DRN-01</div>}
+                          <div className="text-[8px] text-[var(--am)] flex items-center gap-1"><span className="w-1 h-1 bg-[var(--am)] rounded-full"></span> [ALERT] VOIP HANDSHAKE REQUEST REJECTED (LEVEL 2 PARANOIA)</div>
+                       </div>
+                    </div>
+                  </div>
+                  <div className="pn flex flex-col">
+                     <div className="pnh flex justify-between">
+                        <span className="pnt">Secure Messaging</span>
+                        <button className={`text-[8px] ${isPushEnabled ? 'text-[var(--g)]' : 'text-[var(--rd)]'}`} onClick={() => { setIsPushEnabled(!isPushEnabled); playSound('ui_click'); }}>{isPushEnabled ? 'PUSH ON' : 'PUSH OFF'}</button>
+                     </div>
+                     <div className="flex-1 flex flex-col p-2 overflow-hidden">
+                        <div className="flex-1 overflow-y-auto space-y-3 mb-2 pr-1">
+                           {commsLog.map((log, i) => (
+                              <div key={i} className={`p-2 rounded ${log.from === 'HQ' ? 'bg-white/5 border-l-2 border-[var(--bl)]' : 'bg-[var(--g)]/5 border-l-2 border-[var(--g)]'}`}>
+                                 <div className="flex justify-between text-[7px] mb-1 opacity-50">
+                                    <span className="uppercase font-bold">{log.from}</span>
+                                    <span>{log.time}</span>
+                                 </div>
+                                 <div className="text-[9px] leading-tight">{log.msg}</div>
+                              </div>
+                           ))}
+                        </div>
+                        <input 
+                           type="text" 
+                           placeholder="Transmit message..." 
+                           className="bg-black/40 border border-[var(--bdr)] p-2 text-[9px] focus:border-[var(--g)] outline-none"
+                           onKeyDown={(e) => {
+                              if (e.key === 'Enter' && e.currentTarget.value) {
+                                 setCommsLog(prev => [...prev, { from: 'OPERATOR', msg: e.currentTarget.value, time: new Date().toLocaleTimeString() }]);
+                                 e.currentTarget.value = '';
+                                 playSound('ui_confirm');
+                              }
+                           }}
+                        />
+                     </div>
+                  </div>
+                </div>
+              </div>
+            )}
+
+            {activePage === 'lora' && (
+              <div id="pg-lora" className="pg active h-full flex flex-col">
+                <div className="ph">
+                  <div><div className="pt">LORA TRANSCEIVER</div><div className="psub">LONG RANGE LOW POWER MODULATION TUNER</div></div>
+                  <div className="flex gap-2">
+                    <button className="btn bg" onClick={() => playSound('ui_confirm')}>⊕ SYNC NODES</button>
+                  </div>
+                </div>
+                <div className="grid grid-cols-1 lg:grid-cols-4 gap-4 flex-1">
+                   <div className="pn p-4 space-y-6">
+                      <div className="pnh"><span className="pnt">Modulation Parameters</span></div>
+                      <div>
+                         <label className="text-[8px] opacity-50 block mb-1">SPREADING FACTOR (SF)</label>
+                         <select 
+                            className="w-full bg-black border border-[var(--bdr)] text-[10px] p-1 accent-[var(--g)]"
+                            value={loraSettings.sf}
+                            onChange={(e) => { setLoraSettings({...loraSettings, sf: parseInt(e.target.value)}); playSound('ui_click'); }}
+                         >
+                            {[6, 7, 8, 9, 10, 11, 12].map(sf => <option key={sf} value={sf}>SF{sf}</option>)}
+                         </select>
+                      </div>
+                      <div>
+                         <label className="text-[8px] opacity-50 block mb-1">BANDWIDTH (BW)</label>
+                         <select 
+                            className="w-full bg-black border border-[var(--bdr)] text-[10px] p-1"
+                            value={loraSettings.bw}
+                            onChange={(e) => { setLoraSettings({...loraSettings, bw: parseInt(e.target.value)}); playSound('ui_click'); }}
+                         >
+                            {[7.8, 15.6, 31.25, 62.5, 125, 250, 500].map(bw => <option key={bw} value={bw}>{bw} kHz</option>)}
+                         </select>
+                      </div>
+                      <div>
+                         <label className="text-[8px] opacity-50 block mb-1">CODING RATE (CR)</label>
+                         <div className="flex gap-1">
+                            {['4/5', '4/6', '4/7', '4/8'].map(cr => (
+                               <button 
+                                  key={cr} 
+                                  className={`flex-1 text-[8px] py-1 border ${loraSettings.cr === cr ? 'bg-[var(--g)]/20 border-[var(--g)]' : 'border-[var(--bdr)] opacity-50'}`}
+                                  onClick={() => { setLoraSettings({...loraSettings, cr}); playSound('ui_click'); }}
+                               >{cr}</button>
+                            ))}
+                         </div>
+                      </div>
+                      <div>
+                         <label className="text-[8px] opacity-50 block mb-1">TX POWER</label>
+                         <input 
+                            type="range" min="2" max="20" 
+                            value={loraSettings.power} 
+                            onChange={(e) => { setLoraSettings({...loraSettings, power: parseInt(e.target.value)}); playSound('ui_static'); }}
+                            className="w-full"
+                         />
+                         <div className="text-center text-[10px] mt-1 text-[var(--g)]">{loraSettings.power} dBm</div>
+                      </div>
+                      <div className="p-2 bg-[var(--am)]/10 border border-[var(--am)]/30 rounded">
+                         <div className="text-[8px] text-[var(--am)] flex items-center gap-1"><span className="w-1 h-1 bg-[var(--am)] rounded-full"></span> LINK BUDGET WARNING</div>
+                         <div className="text-[7px] opacity-60 mt-1">High SF increases range but lowers data rate. Sync required for SF12.</div>
+                      </div>
+                   </div>
+                   <div className="lg:col-span-3 space-y-4">
+                      <div className="pn flex-1 h-[400px] relative overflow-hidden bg-black/40 border border-[var(--bdr)]/30">
+                         <div className="pnh flex justify-between items-center bg-black/60">
+                            <span className="pnt">LoRa Node Radar</span>
+                            <span className="text-[8px] text-[var(--g)]">MESH NODES: 04 ACTIVE</span>
+                         </div>
+                         {/* Mock LoRa Radar */}
+                         <div className="absolute inset-0 flex items-center justify-center pointer-events-none">
+                            <div className="w-[300px] h-[300px] border border-[var(--g)]/10 rounded-full flex items-center justify-center relative">
+                               <div className="w-[200px] h-[200px] border border-[var(--g)]/10 rounded-full flex items-center justify-center">
+                                  <div className="w-[100px] h-[100px] border border-[var(--g)]/10 rounded-full"></div>
+                               </div>
+                               <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[1px] h-full bg-[var(--g)]/10"></div>
+                               <div className="absolute top-1/2 left-0 -translate-y-1/2 w-full h-[1px] bg-[var(--g)]/10"></div>
+                               
+                               <div className="absolute top-1/4 left-1/4 w-2 h-2 bg-[var(--g)] rounded-full animate-pulse shadow-[0_0_10px_#00ff41]">
+                                  <span className="absolute top-3 left-0 text-[7px] text-[var(--g)] font-mono">NODE_01_SF7</span>
+                               </div>
+                               <div className="absolute bottom-1/3 right-1/4 w-2 h-2 bg-[var(--bl)] rounded-full animate-pulse shadow-[0_0_10px_#00d4ff]">
+                                  <span className="absolute top-3 left-0 text-[7px] text-[var(--bl)] font-mono">NODE_02_SF9</span>
+                               </div>
+                            </div>
+                         </div>
+                         <div className="absolute top-1/2 left-1/2 w-[300px] h-[300px] -translate-x-1/2 -translate-y-1/2 animate-radar-spin border-l border-t border-[var(--g)]/20 rounded-full pointer-events-none"></div>
+                      </div>
+                   </div>
+                </div>
+              </div>
+            )}
+
+            {activePage === 'gsm' && (
+              <div id="pg-gsm" className="pg active h-full flex flex-col items-center">
+                <div className="ph w-full">
+                  <div><div className="pt">GSM HANDSET</div><div className="psub">TACTICAL CELLULAR INTERFACE & DIALER</div></div>
+                  <div className="flex gap-2">
+                    <button className="btn bg" onClick={() => playSound('ui_confirm')}>⊕ IMSI CATCHER</button>
+                    <button className="btn br" onClick={() => { setGsmNumber(''); playSound('ui_error'); }}>CLR</button>
+                  </div>
+                </div>
+                <div className="flex-1 w-full max-w-sm flex flex-col gap-6 p-8">
+                   <div className="pn p-6 flex flex-col gap-6 bg-zinc-900/50 border-zinc-700/50 rounded-xl shadow-2xl">
+                      <div className="w-full bg-black/80 h-16 border border-zinc-700/50 rounded flex items-center justify-end px-4 text-3xl font-mono text-[var(--g)] tracking-widest overflow-hidden">
+                         {gsmNumber || 'ENTER NUMBER'}
+                      </div>
+                      <div className="grid grid-cols-3 gap-4">
+                         {['1', '2', '3', '4', '5', '6', '7', '8', '9', '*', '0', '#'].map(key => (
+                            <button 
+                               key={key} 
+                               className="w-full h-16 bg-white/5 border border-white/10 rounded-lg flex items-center justify-center text-xl hover:bg-white/10 active:bg-[var(--g)]/20 active:border-[var(--g)] transition-colors"
+                               onClick={() => { setGsmNumber(prev => prev + key); playSound('ui_click'); }}
+                            >
+                               {key}
+                            </button>
+                         ))}
+                      </div>
+                      <button 
+                         className="w-full h-16 bg-[var(--g)] text-black font-bold text-xl rounded-lg hover:scale-[1.02] active:scale-95 transition-transform"
+                         onClick={() => {
+                            if (!gsmNumber) return;
+                            setActiveCall({ id: gsmNumber, type: 'VOIP' });
+                            setActivePage('comms');
+                            playSound('ui_confirm');
+                         }}
+                      >CALL</button>
+                      <div className="flex justify-between items-center px-2">
+                         <div className="flex gap-1">
+                            <span className="w-1 h-3 bg-[var(--g)] rounded-full"></span>
+                            <span className="w-1 h-3 bg-[var(--g)] rounded-full"></span>
+                            <span className="w-1 h-3 bg-[var(--g)] rounded-full"></span>
+                            <span className="w-1 h-3 bg-white/20 rounded-full"></span>
+                         </div>
+                         <div className="text-[8px] font-mono opacity-40">CARRIER: AEGIS-NET | 4G LTE</div>
+                      </div>
+                   </div>
+                   <div className="pn p-4 text-center">
+                      <div className="text-[10px] opacity-50 mb-2">CONNECTED ASSET</div>
+                      <div className="text-xs font-mono text-[var(--g)] tracking-tighter uppercase underline underline-offset-4 decoration-[var(--g)]/30">OPERATOR-HUD-77291</div>
+                   </div>
+                </div>
+              </div>
+            )}
+
+            {activePage === 'liveradar' && (
+              <div id="pg-sat-radar" className="pg active h-full flex flex-col">
+                <div className="ph">
+                  <div><div className="pt">SATELLITE SURVEILLANCE RADAR</div><div className="psub">REAL-TIME MULTI-STATIC SATELLITE IMAGERY & THREAT OVERLAY</div></div>
+                  <div className="flex gap-2">
+                    <button className="btn bg" onClick={() => { window.scanNow?.(); playSound('ui_click'); }}>⊕ RECALIBRATE SENSORS</button>
+                    <button className="btn bb" onClick={() => {
+                        const m = window.satRadarMap;
+                        if (m) {
+                            m.setZoom(m.getZoom() + 1);
+                            playSound('ui_click');
+                        }
+                    }}>↑ ZOOM IN</button>
+                    <button className="btn bb" onClick={() => {
+                        const m = window.satRadarMap;
+                        if (m) {
+                            m.setZoom(m.getZoom() - 1);
+                            playSound('ui_click');
+                        }
+                    }}>↓ ZOOM OUT</button>
+                  </div>
+                </div>
+                <div className="flex-1 min-h-[500px] relative border border-[var(--bdr)] overflow-hidden">
+                   <div id="sat-radar-map" className="absolute inset-0 bg-black"></div>
+                   
+                   {/* Radar Overlay Effect */}
+                   <div className="absolute inset-0 pointer-events-none z-[1000]">
+                      <div className="w-full h-full border-[20px] border-black/30 pointer-events-none"></div>
+                      <div className="absolute top-0 left-0 w-full h-[1px] bg-[var(--g)]/10 animate-scan-line"></div>
+                      <div className="absolute top-0 left-0 p-4 font-mono text-[var(--g)] text-[10px] space-y-1">
+                         <div className="flex items-center gap-2"><div className="w-2 h-2 bg-[var(--g)] rounded-full animate-pulse"></div> SATELLITE: AEGIS-7 (ORBITAL)</div>
+                         <div>UPLINK: 42.5 GBPS</div>
+                         <div>SYNC: {time.toISOString()}</div>
+                         <div>LAT: {HQ_LAT.toFixed(4)}N</div>
+                         <div>LON: {HQ_LON.toFixed(4)}E</div>
+                      </div>
+                      <div className="absolute bottom-4 left-4 p-2 bg-black/60 border border-[var(--g)]/30 text-[8px] text-[var(--g)]">
+                         <div className="flex items-center gap-1">
+                            <span className="w-2 h-2 bg-[var(--rd)] rounded-full mr-1"></span> HOSTILE DETECTED
+                         </div>
+                         <div className="flex items-center gap-1">
+                            <span className="w-2 h-2 bg-[var(--g)] rounded-full mr-1"></span> FRIENDLY ASSET
+                         </div>
+                      </div>
+                      
+                      {/* Compass/HUD Overlay */}
+                      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[80%] h-[80%] border border-[var(--g)]/5 rounded-full pointer-events-none"></div>
+                      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[60%] h-[60%] border border-[var(--g)]/5 rounded-full pointer-events-none"></div>
+                      <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-[40%] h-[40%] border border-[var(--g)]/5 rounded-full pointer-events-none"></div>
+                   </div>
+                </div>
+              </div>
+            )}
+
             {activePage === 'dashboard' && (
               <div id="pg-dashboard" className="pg active">
                 <div className="ph">
                   <div><div className="pt">AEGIS COMMAND DASHBOARD</div><div className="psub">LIVE TACTICAL OVERVIEW — MALACCA STRAIT SECTOR</div></div>
                   <div className="flex gap-2">
-                    <button className="btn bg" onClick={() => window.scanNow?.()}>⊕ SYSTEM SCAN</button>
-                    <button className="btn br" onClick={() => window.emergStop?.()}>⚡ EMERGENCY STOP</button>
+                    <button className="btn bg" onClick={() => { window.scanNow?.(); playSound('ui_click'); }}>⊕ SYSTEM SCAN</button>
+                    <button className="btn br" onClick={() => { window.emergStop?.(); playSound('ui_click'); }}>⚡ EMERGENCY STOP</button>
                   </div>
                 </div>
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
@@ -982,8 +1799,8 @@ export default function App() {
                 <div className="ph">
                   <div><div className="pt">FIGHTER JET RADAR</div><div className="psub">ADVANCED STEALTH DETECTION — F-35 / F-22 / SU-57</div></div>
                   <div className="flex gap-2">
-                    <button className="btn bg" onClick={() => window.scanNow?.()}>⊕ DEEP SCAN</button>
-                    <button className="btn br" onClick={() => window.jamEntity?.('ALL_HOSTILE')}>⚡ MASS JAM</button>
+                    <button className="btn bg" onClick={() => { window.scanNow?.(); playSound('ui_click'); }}>⊕ DEEP SCAN</button>
+                    <button className="btn br" onClick={() => { window.jamEntity?.('ALL_HOSTILE'); playSound('ui_alert'); }}>⚡ MASS JAM</button>
                   </div>
                 </div>
                 <div className="grid grid-cols-1 lg:grid-cols-3 gap-4 mb-4">
@@ -1025,9 +1842,10 @@ export default function App() {
                 <div className="ph">
                   <div><div className="pt">DRONEMISSION DESIGNER</div><div className="psub">TACTICAL UAV TASKING & OPERATIONAL PLANNING</div></div>
                   <div className="flex gap-2">
-                    <button className="btn bg" onClick={() => window.scanNow?.()}>⊕ REFRESH TARGETS</button>
+                    <button className="btn bg" onClick={() => { window.scanNow?.(); playSound('ui_click'); }}>⊕ REFRESH TARGETS</button>
                     <button className="btn bb" onClick={() => {
                         if (!selectedDrone) return;
+                        playSound('ui_confirm');
                         const lat = fleet.find(d => d.id === selectedDrone)?.lat || 6.12;
                         const lon = fleet.find(d => d.id === selectedDrone)?.lon || 102.25;
                         const radius = 0.01;
@@ -1070,7 +1888,8 @@ export default function App() {
                           
                           <div className="flex items-center gap-4 text-[8px] opacity-60 mb-3">
                             <div className="flex items-center gap-1">
-                              <div className="w-2 h-2 rounded-full bg-[var(--g)]"></div> {drone.batt}% POWER
+                              <div className={`w-2 h-2 rounded-full ${drone.batt <= battThreshold ? 'bg-[var(--rd)] animate-pulse shadow-[0_0_5px_var(--rd)]' : 'bg-[var(--g)]'}`}></div> 
+                              <span className={drone.batt <= battThreshold ? 'text-[var(--rd)] font-bold' : ''}>{drone.batt}% POWER</span>
                             </div>
                             <div className="flex items-center gap-1">
                               <div className="w-2 h-2 rounded-full bg-[var(--bl)]"></div> {drone.signal}% SIG
@@ -1078,9 +1897,15 @@ export default function App() {
                           </div>
 
                           <div className="flex gap-1">
+                            {drone.batt <= battThreshold && drone.status !== 'RTB' && (
+                                <button className="btn br py-1 px-3 text-[8px] animate-pulse" onClick={(e) => {
+                                    e.stopPropagation();
+                                    setFleet(prev => prev.map(d => d.id === drone.id ? { ...d, status: 'RTB', mission: 'EMERGENCY RTB' } : d));
+                                    window.sysLog?.(`[COMMAND] Emergency RTB sequence initiated for ${drone.id}`, 'w');
+                                }}>EMERGENCY RTB</button>
+                            )}
                             <button className="btn bg py-1 px-3 text-[8px]" onClick={(e) => { e.stopPropagation(); setSelectedDrone(drone.id); setActivePage('drone'); }}>PLAN</button>
                             <button className="btn bb py-1 px-3 text-[8px]" onClick={(e) => { e.stopPropagation(); setSelectedDrone(drone.id); setActivePage('camera'); }}>OPTICS</button>
-                            <button className="btn br py-1 px-3 text-[8px]" onClick={(e) => { e.stopPropagation(); window.jamEntity?.(drone.id); }}>ABORT</button>
                           </div>
                         </div>
                       ))}
@@ -1101,10 +1926,12 @@ export default function App() {
                               [selectedDrone]: { ...prev[selectedDrone], waypoints: [] }
                             }));
                             window.sysLog?.(`[DRONE] Waypoints cleared for ${selectedDrone}`, 'w');
+                            playSound('ui_alert');
                           }}>CLEAR PLAN</button>
                           <button className="btn bg py-1 px-2 text-[8px]" onClick={() => {
                             window.sysLog?.(`[DRONE] Strategic mission data uploaded to ${selectedDrone}`, 'ok');
                             window.alert2?.('Mission Data Link Established', 'g');
+                            playSound('ui_confirm');
                           }}>COMMENCE MISSION</button>
                         </div>
                       )}
@@ -1115,6 +1942,22 @@ export default function App() {
                       ) : (
                         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                           <div className="space-y-4">
+                            <div>
+                              <div className="fl">Battery Warning Threshold (%)</div>
+                              <input 
+                                type="range" 
+                                min="5" 
+                                max="50" 
+                                value={battThreshold} 
+                                onChange={(e) => setBattThreshold(parseInt(e.target.value))}
+                                className="w-full h-1 bg-black/40 rounded-lg appearance-none cursor-pointer accent-[var(--rd)]"
+                              />
+                              <div className="flex justify-between text-[8px] text-[var(--txd)] mt-1">
+                                <span>5%</span>
+                                <span className="text-[var(--rd)] font-bold">{battThreshold}%</span>
+                                <span>50%</span>
+                              </div>
+                            </div>
                             <div>
                               <div className="fl">Rules of Engagement</div>
                               <select 
@@ -1136,16 +1979,59 @@ export default function App() {
                               <select 
                                 className="fsel" 
                                 value={droneMissions[selectedDrone]?.targetId || ''} 
-                                onChange={(e) => setDroneMissions(prev => ({
-                                  ...prev,
-                                  [selectedDrone]: { ...prev[selectedDrone], targetId: e.target.value || null }
-                                }))}
+                                onChange={(e) => {
+                                  const targetId = e.target.value || null;
+                                  const targetDevice = window.DEV?.find((d: any) => d.id === targetId);
+                                  setDroneMissions(prev => ({
+                                    ...prev,
+                                    [selectedDrone]: { ...prev[selectedDrone], targetId }
+                                  }));
+                                  if (targetId) {
+                                    window.sysLog?.(`[MISSION] ${selectedDrone} vectoring to target ${targetId} (${targetDevice?.type || 'UNKNOWN'})`, 'ok');
+                                  } else {
+                                    window.sysLog?.(`[MISSION] ${selectedDrone} target lock released.`, 'i');
+                                  }
+                                }}
                               >
                                 <option value="">FREE HUNT / NO SPECIFIC TARGET</option>
                                 {window.DEV?.filter((d: any) => d.status !== 'FRIENDLY').map((d: any) => (
                                   <option key={d.id} value={d.id}>{d.id} ({d.status} - {d.type})</option>
                                 ))}
                               </select>
+                              {droneMissions[selectedDrone]?.targetId && (
+                                <div className="mt-2 p-3 bg-black/60 border border-[var(--rd)]/40 rounded overflow-hidden relative">
+                                   <div className="absolute top-0 right-0 p-1 px-2 bg-[var(--rd)] text-black text-[7px] font-bold">LOCK ON</div>
+                                   <div className="text-[var(--rd)] font-bold flex justify-between items-center mb-2">
+                                      <span className="text-[10px]">TARGET: {droneMissions[selectedDrone].targetId}</span>
+                                      <span className="bd r text-[7px]">{window.DEV?.find((d: any) => d.id === droneMissions[selectedDrone].targetId)?.status}</span>
+                                   </div>
+                                   <div className="grid grid-cols-2 gap-2 text-[9px]">
+                                      <div className="bg-white/5 p-1 px-2 border border-white/10">
+                                         <div className="text-[7px] opacity-50">TYPE</div>
+                                         <div className="text-[var(--txd)] truncate">{window.DEV?.find((d: any) => d.id === droneMissions[selectedDrone].targetId)?.type}</div>
+                                      </div>
+                                      <div className="bg-white/5 p-1 px-2 border border-white/10">
+                                         <div className="text-[7px] opacity-50">SPEED</div>
+                                         <div className="text-[var(--g)]">{window.DEV?.find((d: any) => d.id === droneMissions[selectedDrone].targetId)?.speed} km/h</div>
+                                      </div>
+                                      <div className="bg-white/5 p-1 px-2 border border-white/10">
+                                         <div className="text-[7px] opacity-50">DISTANCE</div>
+                                         <div className="text-[var(--bl)]">{window.DEV?.find((d: any) => d.id === droneMissions[selectedDrone].targetId)?.range.toFixed(2)} km</div>
+                                      </div>
+                                      <div className="bg-white/5 p-1 px-2 border border-white/10">
+                                         <div className="text-[7px] opacity-50">COORD</div>
+                                         <div className="text-white/80">{window.DEV?.find((d: any) => d.id === droneMissions[selectedDrone].targetId)?.lat.toFixed(4)}, {window.DEV?.find((d: any) => d.id === droneMissions[selectedDrone].targetId)?.lon.toFixed(4)}</div>
+                                      </div>
+                                   </div>
+                                   <button className="w-full mt-2 py-1 bg-[var(--rd)]/20 hover:bg-[var(--rd)]/40 text-[8px] text-[var(--rd)] border border-[var(--rd)]/40 transition-colors uppercase font-bold" onClick={() => {
+                                       setDroneMissions(prev => ({
+                                           ...prev,
+                                           [selectedDrone]: { ...prev[selectedDrone], targetId: null }
+                                       }));
+                                       window.sysLog?.(`[DRONE] Target lock for ${selectedDrone} released by operator`, 'i');
+                                   }}>Release Target Lock</button>
+                                </div>
+                              )}
                             </div>
                             <div className="pn bg-black/40 border-[var(--bdr)] p-3">
                                <div className="text-[10px] text-[var(--g)] font-bold mb-2 uppercase">Mission Summary</div>
@@ -1172,6 +2058,7 @@ export default function App() {
                                           return { ...prev, [selectedDrone]: { ...prev[selectedDrone], waypoints: newWaypoints } };
                                         });
                                         window.sysLog?.(`[MISSION] Waypoint ${i+1} removed from flight path`, 'w');
+                                        playSound('ui_error');
                                       }}>PURGE</button>
                                     </div>
                                     <div className="grid grid-cols-2 gap-2">
@@ -1374,20 +2261,34 @@ export default function App() {
                           </tr>
                         </thead>
                         <tbody>
-                          {[
-                            { id: 'DRN-01', type: 'UAV', target: droneMissions['DRN-01']?.targetId || 'NONE', roe: droneMissions['DRN-01']?.roe, st: 'ON STATION' },
-                            { id: 'DRN-02', type: 'UAV', target: droneMissions['DRN-02']?.targetId || 'NONE', roe: droneMissions['DRN-02']?.roe, st: 'PATROLLING' },
-                            { id: 'IRON-DOME', type: 'SAM', target: 'AUTO-THREAT', roe: 'DEFENSIVE', st: 'ACTIVE' },
-                            { id: 'ARROW-3', type: 'ABM', target: 'NONE', roe: 'PASSIVE', st: 'STANDBY' },
-                          ].map(asset => (
-                            <tr key={asset.id}>
-                              <td className="font-bold text-[var(--g)]">{asset.id}</td>
-                              <td>{asset.type}</td>
-                              <td className={asset.target !== 'NONE' ? 'text-[var(--rd)]' : ''}>{asset.target}</td>
-                              <td><span className={`bd ${asset.roe === 'AGGRESSIVE' ? 'r' : asset.roe === 'DEFENSIVE' ? 'a' : 'g'}`}>{asset.roe}</span></td>
-                              <td>{asset.st}</td>
-                            </tr>
-                          ))}
+                          {fleet.map(drone => {
+                            const mission = droneMissions[drone.id];
+                            return (
+                              <tr key={drone.id}>
+                                <td className="font-bold text-[var(--g)]">{drone.id}</td>
+                                <td>DRONE</td>
+                                <td className={mission?.targetId ? 'text-[var(--rd)]' : ''}>{mission?.targetId || 'FREE HUNT'}</td>
+                                <td><span className={`bd ${mission?.roe === 'AGGRESSIVE' ? 'r' : mission?.roe === 'DEFENSIVE' ? 'a' : 'g'}`}>{mission?.roe || 'PASSIVE'}</span></td>
+                                <td>
+                                  {drone.status === 'RTB' ? 'RETURNING' : drone.status === 'ACTIVE' ? (mission?.targetId ? 'INTERCEPT' : mission?.waypoints.length > 0 ? 'ON ROUTE' : 'PATROL') : drone.status}
+                                </td>
+                              </tr>
+                            );
+                          })}
+                          <tr className="border-t border-[var(--bdr)]/30">
+                            <td className="font-bold text-[var(--g)]">IRON-DOME</td>
+                            <td>SAM</td>
+                            <td>AUTO-THREAT</td>
+                            <td><span className="bd a">DEFENSIVE</span></td>
+                            <td>ACTIVE</td>
+                          </tr>
+                          <tr>
+                            <td className="font-bold text-[var(--g)]">ARROW-3</td>
+                            <td>ABM</td>
+                            <td>NONE</td>
+                            <td><span className="bd g">PASSIVE</span></td>
+                            <td>STANDBY</td>
+                          </tr>
                         </tbody>
                       </table>
                     </div>
@@ -1528,12 +2429,18 @@ export default function App() {
                             <div className="flex items-center gap-2">
                               <div className="flex-1 h-2 bg-black/40 border border-[var(--bdr)] rounded-full overflow-hidden">
                                 <div 
-                                  className={`h-full ${drone.batt > 50 ? 'bg-[var(--g)]' : drone.batt > 20 ? 'bg-[var(--am)]' : 'bg-[var(--rd)]'}`} 
+                                  className={`h-full ${drone.batt > 50 ? 'bg-[var(--g)]' : drone.batt > battThreshold ? 'bg-[var(--am)]' : 'bg-[var(--rd)] animate-pulse shadow-[0_0_5px_var(--rd)]'}`} 
                                   style={{ width: `${drone.batt}%` }}
                                 ></div>
                               </div>
-                              <span className="text-[10px] w-8">{drone.batt}%</span>
+                              <span className={`text-[10px] w-8 ${drone.batt <= battThreshold ? 'text-[var(--rd)] font-bold' : ''}`}>{drone.batt}%</span>
                             </div>
+                            {drone.batt <= battThreshold && drone.status !== 'RTB' && (
+                                <button className="mt-1 w-full text-[7px] text-[var(--rd)] underline font-bold uppercase hover:text-white" onClick={() => {
+                                    setFleet(prev => prev.map(d => d.id === drone.id ? { ...d, status: 'RTB', mission: 'LOW BATT RTB' } : d));
+                                    window.sysLog?.(`[AUTO-CMD] Low battery recovery sequence start: ${drone.id}`, 'w');
+                                }}>Force RTB</button>
+                            )}
                           </div>
                           <div>
                             <div className="fl">SIGNAL</div>
@@ -1613,7 +2520,7 @@ export default function App() {
                   </div>
                 </div>
                 <div className="pn">
-                  <div className="pnh"><span className="pnt">⊕ Contact List</span><span className="text-[10px] text-[var(--txd)]" id="dcnt">10 CONTACTS</span></div>
+                  <div className="pnh"><span className="pnt">⊕ Contact List</span><span className="text-[10px] text-[var(--txd)]" id="dcnt">{window.DEV?.length || 0} CONTACTS</span></div>
                   <div className="overflow-x-auto">
                     <table className="dt w-full">
                       <thead>

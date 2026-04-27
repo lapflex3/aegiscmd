@@ -772,6 +772,37 @@ input[type=range] {
   filter: hue-rotate(100deg) saturate(0.6) brightness(0.55) contrast(1.15);
 }
 
+#pg-sat-radar .leaflet-tile-pane {
+  filter: none !important;
+}
+
+@keyframes scan-line {
+  0% { transform: translateY(0); }
+  100% { transform: translateY(500px); }
+}
+
+.animate-scan-line {
+  animation: scan-line 8s linear infinite;
+}
+
+@keyframes radar-spin {
+  from { transform: translate(-50%, -50%) rotate(0deg); }
+  to { transform: translate(-50%, -50%) rotate(360deg); }
+}
+
+.animate-radar-spin {
+  animation: radar-spin 4s linear infinite;
+}
+
+@keyframes reverse-spin {
+  from { transform: rotate(0deg); }
+  to { transform: rotate(-360deg); }
+}
+
+.animate-reverse-spin {
+  animation: reverse-spin 10s linear infinite;
+}
+
 .leaflet-popup-content-wrapper {
   background: #040f08;
   border: 1px solid #00ff4155;
